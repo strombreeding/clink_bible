@@ -1,9 +1,7 @@
-const cheerio = require("cheerio");
-const axios = require("axios");
+const fs = require("fs");
 const puppeteer = require("puppeteer");
 const { bibles } = require("./const");
-
-console.log(bibles);
+// 시편부터 split: ,1
 
 const urlData = {
   code: "",
@@ -20,79 +18,115 @@ const changeUrlData = (arr) => {
 
 const getSource = async (bibles, isOldTestament, page) => {
   const chapterList = [];
-  const verseList = [];
+  let verseList = [];
   for (let i = 0; i < bibles.length; i++) {
     changeUrlData(bibles[i]);
-    const url = `https://www.bskorea.or.kr/KNT/index.php?version=d7a4326402395391-01&abbr=engKJVCPB&chapter=${urlData.code}.${urlData.maxChapter}`;
-    await page.goto(url);
-    await page.waitForSelector("[data-verse-org-ids]");
-    const chapterData = {
-      name: urlData.name,
-      translation: "새한글",
-      isOldTestament,
-      prevChapter: null,
-      nextChapter: null,
-      chapter: i + 1,
-      customId: `SAEHAN-${urlData.code}-${i + 1}@`,
-    };
-    chapterList.push(chapterData);
+    console.log(urlData);
+    for (let nowChapter = 1; nowChapter <= urlData.maxChapter; nowChapter++) {
+      const url = `https://www.bskorea.or.kr/KNT/index.php?version=d7a4326402395391-01&abbr=engKJVCPB&chapter=${urlData.code}.${nowChapter}`;
+      await page.goto(url);
+      await page.waitForSelector("#content");
 
-    // 벌스구하기
+      const chapterData = {
+        name: urlData.name,
+        translation: "새한글",
+        isOldTestament,
+        prevChapter: null,
+        nextChapter: null,
+        chapter: nowChapter,
+        customId: `SAEHAN-${urlData.code}-${nowChapter}@`,
+      };
+      chapterList.push(chapterData);
 
-    // 여기서부터 변환하라
+      // 벌스구하기
 
-    const verseData = await page.evaluate(
-      (urlData, chapterData) => {
-        const elements = document.querySelectorAll("[data-verse-org-ids]");
-        const maxVerse =
-          elements[elements.length - 1].dataset.verseOrgIds.split(".")[2];
+      // 여기서부터 변환하라
 
-        for (let verseCnt = 1; verseCnt <= maxVerse; verseCnt++) {
-          const filteredElements = Array.from(elements).filter(
-            (el) =>
-              el.dataset.verseOrgIds ===
-              `${urlData.code}.${urlData.maxChapter}.${verseCnt}`
-          );
-
-          let verseText = "";
-          //   절이 여러개로 나눠져있고 0번째는 무조건 절의 이름이니 빼야함
-          filteredElements.forEach((index, item) => {
-            if (index > 0) {
-              verseText += $(item).text();
+      const verseData = await page.evaluate(
+        (urlData, chapterData, nowChapter) => {
+          const list = [];
+          const elements = document.querySelectorAll("[data-verse-id]");
+          const maxVerse =
+            elements[elements.length - 1].dataset.verseId.split(".")[2];
+          for (let verseCnt = 1; verseCnt <= maxVerse; verseCnt++) {
+            const filteredElements = Array.from(elements).filter(
+              (el) =>
+                el.dataset.verseId ===
+                `${urlData.code}.${nowChapter}.${verseCnt}`
+            );
+            let verseText = "";
+            //   절이 여러개로 나눠져있고 0번째는 무조건 절의 이름이니 빼야함
+            for (
+              let verseDetail = 0;
+              verseDetail < filteredElements.length;
+              verseDetail++
+            ) {
+              if (verseDetail > 0) {
+                verseText += filteredElements[verseDetail].textContent;
+              }
             }
-          });
-          const verseObj = {
-            customId: `${chapterData.customId}:${verseCnt}`,
-            chapterId: chapterData.customId,
-            index: verseCnt,
-            content: verseText,
-            markedUsers: [],
-          };
 
-          return verseObj;
-        }
-      },
-      urlData,
-      chapterData
-    );
-    console.log(verseData);
-    verseList.push(verseData);
+            const verseObj = {
+              customId: `${chapterData.customId}:${verseCnt}`,
+              chapterId: chapterData.customId,
+              index: verseCnt,
+              content: verseText,
+              markedUsers: [],
+            };
+
+            list.push(verseObj);
+          }
+          return list;
+        },
+        urlData,
+        chapterData,
+        nowChapter
+      );
+
+      verseList = [...verseList, ...verseData];
+    }
   }
 
   return { chapterList, verseList };
 };
 
+const finish = (list) => {
+  const result = list.map((item, index) => {
+    item.prevChapter = index === 0 ? null : list[index - 1].customId;
+    item.nextChapter =
+      list.length - 1 === index ? null : list[index + 1].customId;
+  });
+  return result;
+};
 const main = async () => {
   const browser = await puppeteer.launch({
-    headless: "false",
-    defaultViewprot: null,
+    headless: true,
+    // args: ["--window-size=1920,1080", "--disable-notifications"],
   });
+  const page1 = await browser.newPage();
+  const page2 = await browser.newPage();
+  //   await page.setViewport({
+  //     width: 1080,
+  //     height: 1080,
+  //   });
 
-  const page = await browser.newPage();
-
-  const oldTestament = await getSource(bibles[0], true, page);
-  const newTestament = await getSource(bibles[1], false, page);
-  console.log(oldTestament);
+  const [oldTestament, newTestament] = await Promise.all([
+    (getSource(bibles[0], true, page1), getSource(bibles[1], false, page2)),
+  ]);
+  //   const oldTestament = await getSource(bibles[0], true, page);
+  //   const newTestament = await getSource(bibles[1], false, page);
+  const chapters = JSON.stringify(
+    finish([...oldTestament.chapterList, ...newTestament.chapterList]),
+    null,
+    2
+  );
+  const verses = JSON.stringify(
+    [...oldTestament.verseList, ...newTestament.verseList],
+    null,
+    2
+  );
+  fs.writeFileSync("chapter.json", chapters);
+  fs.writeFileSync("verse.json", verses);
 };
 
 main();
